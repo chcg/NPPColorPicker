@@ -26,6 +26,3 @@ Click the color palette to select a color.
 
 2026/10/16 Added enable/disable settings for keyboard shortcuts and the taskbar icon.
 
-本程式為解決個人使用問題，依賴 Codex GPT-5.6-Terra medium 開發完成
-
-This program was developed to address a personal need, with the assistance of Codex GPT-5.6-Terra Medium.
