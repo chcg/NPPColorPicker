@@ -6,9 +6,14 @@
 #define NPPM_GETCURRENTSCINTILLA (NPPMSG + 4)
 #define NPPM_GETSCINTILLAHANDLE  (NPPMSG + 5)
 #define NPPM_GETNATIVELANGFILENAME (NPPMSG + 116)
+#define NPPM_SETMENUITEMCHECK (NPPMSG + 40)
+#define NPPM_ADDTOOLBARICON_FORDARKMODE (NPPMSG + 101)
 #define NPPN_FIRST 1000
 #define NPPN_READY (NPPN_FIRST + 1)
+#define NPPN_TBMODIFICATION (NPPN_FIRST + 2)
 #define NPPN_NATIVELANGCHANGED (NPPN_FIRST + 31)
+
+struct ToolbarIconsWithDarkMode { HBITMAP hToolbarBmp; HICON hToolbarIcon; HICON hToolbarIconDarkMode; };
 
 struct SCNotification {
     NMHDR nmhdr; intptr_t position; int ch; int modifiers; int modificationType;

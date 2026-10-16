@@ -1,11 +1,13 @@
 #include "PluginApi.h"
 #include <commdlg.h>
+#include <commctrl.h>
 #include <cstdio>
 #include <cstring>
 #include <windowsx.h>
 
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Msimg32.lib")
+#pragma comment(lib, "Comctl32.lib")
 
 constexpr UINT SCI_GETCHARAT = 2007;
 constexpr UINT SCI_SETTARGETSTART = 2190;
@@ -27,6 +29,9 @@ static COLORREF g_customColors[16]{};
 static HWND g_settingsWindow = nullptr;
 static bool g_selectOnHover = true;
 static bool g_useNativePickerForAlpha = true;
+static bool g_enabled = true;
+static WORD g_toggleHotkey = 0;
+static ToolbarIconsWithDarkMode g_toolbarIcons{};
 static wchar_t g_settingsPath[MAX_PATH]{};
 static bool g_hasHoverSelection = false;
 static HWND g_hoverEditor = nullptr;
@@ -38,11 +43,14 @@ static bool g_isTraditionalChinese = false;
 
 static void Settings();
 static void About();
-static FuncItem g_funcs[] = { { L"Color Picker - Settings", Settings, 0, false, nullptr }, { L"Color Picker - About", About, 0, false, nullptr } };
+static void ToggleEnabled();
+static FuncItem g_funcs[] = { { L"Color Picker - Enabled", ToggleEnabled, 0, true, nullptr }, { L"Color Picker - Settings", Settings, 0, false, nullptr }, { L"Color Picker - About", About, 0, false, nullptr } };
 
 constexpr int ID_SELECT_ON_HOVER = 1001;
 constexpr int ID_SAVE_SETTINGS = 1002;
 constexpr int ID_USE_NATIVE_PICKER_FOR_ALPHA = 1003;
+constexpr int ID_TOGGLE_HOTKEY = 1004;
+constexpr int ID_CLEAR_HOTKEY = 1005;
 constexpr int ID_RGBA_RED = 1101;
 constexpr int ID_RGBA_GREEN = 1102;
 constexpr int ID_RGBA_BLUE = 1103;
@@ -66,8 +74,9 @@ static void RefreshUiLanguage() {
     char languageFile[MAX_PATH]{};
     SendMessage(g_npp._nppHandle, NPPM_GETNATIVELANGFILENAME, sizeof(languageFile), reinterpret_cast<LPARAM>(languageFile));
     g_isTraditionalChinese = _stricmp(languageFile, "chinese.xml") == 0 || _stricmp(languageFile, "taiwaneseMandarin.xml") == 0 || _stricmp(languageFile, "hongKongCantonese.xml") == 0;
-    wcscpy_s(g_funcs[0]._itemName, g_isTraditionalChinese ? L"色彩選擇器 - 設定" : L"Color Picker - Settings");
-    wcscpy_s(g_funcs[1]._itemName, g_isTraditionalChinese ? L"色彩選擇器 - 關於" : L"Color Picker - About");
+    wcscpy_s(g_funcs[0]._itemName, g_isTraditionalChinese ? L"色彩選擇器 - 啟用" : L"Color Picker - Enabled");
+    wcscpy_s(g_funcs[1]._itemName, g_isTraditionalChinese ? L"色彩選擇器 - 設定" : L"Color Picker - Settings");
+    wcscpy_s(g_funcs[2]._itemName, g_isTraditionalChinese ? L"色彩選擇器 - 關於" : L"Color Picker - About");
 }
 
 struct RgbaPickerData { int red; int green; int blue; int alpha; bool accepted = false; HWND window = nullptr; };
@@ -334,9 +343,18 @@ static bool PickColor(HWND editor, LPARAM mousePosition) {
 }
 
 static LRESULT CALLBACK ScintillaProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_MOUSEMOVE) { TRACKMOUSEEVENT tracking{ sizeof(tracking), TME_LEAVE, hwnd, 0 }; TrackMouseEvent(&tracking); ShowPreview(hwnd, lParam); }
+    if (g_toggleHotkey && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && !(lParam & (1LL << 30))) {
+        const WORD modifiers = HIBYTE(g_toggleHotkey);
+        if (wParam == LOBYTE(g_toggleHotkey) &&
+            ((GetKeyState(VK_CONTROL) & 0x8000) != 0) == ((modifiers & HOTKEYF_CONTROL) != 0) &&
+            ((GetKeyState(VK_MENU) & 0x8000) != 0) == ((modifiers & HOTKEYF_ALT) != 0) &&
+            ((GetKeyState(VK_SHIFT) & 0x8000) != 0) == ((modifiers & HOTKEYF_SHIFT) != 0)) {
+            ToggleEnabled(); return 0;
+        }
+    }
+    if (message == WM_MOUSEMOVE && g_enabled) { TRACKMOUSEEVENT tracking{ sizeof(tracking), TME_LEAVE, hwnd, 0 }; TrackMouseEvent(&tracking); ShowPreview(hwnd, lParam); }
     if (message == WM_MOUSELEAVE) { if (g_preview) ShowWindow(g_preview, SW_HIDE); RestoreHoverSelection(hwnd); }
-    if (message == WM_LBUTTONDOWN) {
+    if (message == WM_LBUTTONDOWN && g_enabled) {
         const intptr_t position = SendMessage(hwnd, SCI_POSITIONFROMPOINTCLOSE, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         if (TokenAt(hwnd, position).start >= 0) { g_colorClickEditor = hwnd; g_colorClickPosition = lParam; SetCapture(hwnd); return 0; }
     }
@@ -355,6 +373,72 @@ static void Attach() {
     if (g_npp._scintillaSecondHandle && !g_oldSecondProc) g_oldSecondProc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(g_npp._scintillaSecondHandle, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ScintillaProc)));
 }
 
+static void ToggleEnabled() {
+    g_enabled = !g_enabled;
+    if (!g_enabled) {
+        if (g_preview) ShowWindow(g_preview, SW_HIDE);
+        if (g_hoverEditor) RestoreHoverSelection(g_hoverEditor);
+        if (g_colorClickEditor && GetCapture() == g_colorClickEditor) ReleaseCapture();
+        g_colorClickEditor = nullptr;
+        g_colorClickPosition = 0;
+    }
+    SendMessage(g_npp._nppHandle, NPPM_SETMENUITEMCHECK, g_funcs[0]._cmdID, g_enabled);
+    if (g_settingsPath[0]) WritePrivateProfileString(L"Settings", L"Enabled", g_enabled ? L"1" : L"0", g_settingsPath);
+}
+
+static HBITMAP MakeToolbarBitmap(bool dark) {
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, 16, 16);
+    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+    RECT bounds{ 0, 0, 16, 16 };
+    FillRect(dc, &bounds, GetSysColorBrush(dark ? COLOR_WINDOWFRAME : COLOR_WINDOW));
+    const COLORREF colors[] = { RGB(235, 77, 65), RGB(241, 190, 65), RGB(78, 177, 103), RGB(65, 130, 230) };
+    const RECT tiles[] = { { 2, 2, 8, 8 }, { 8, 2, 14, 8 }, { 2, 8, 8, 14 }, { 8, 8, 14, 14 } };
+    for (int i = 0; i < 4; ++i) {
+        HBRUSH brush = CreateSolidBrush(colors[i]);
+        FillRect(dc, &tiles[i], brush);
+        DeleteObject(brush);
+    }
+    HBRUSH frame = CreateSolidBrush(dark ? RGB(230, 230, 230) : RGB(45, 45, 45));
+    FrameRect(dc, &bounds, frame);
+    DeleteObject(frame);
+    SelectObject(dc, oldBitmap);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+    return bitmap;
+}
+
+static HICON MakeToolbarIcon(HBITMAP color) {
+    HBITMAP mask = CreateBitmap(16, 16, 1, 1, nullptr);
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HGDIOBJ oldBitmap = SelectObject(dc, mask);
+    PatBlt(dc, 0, 0, 16, 16, BLACKNESS);
+    SelectObject(dc, oldBitmap);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmMask = mask;
+    info.hbmColor = color;
+    HICON icon = CreateIconIndirect(&info);
+    DeleteObject(mask);
+    return icon;
+}
+
+static void AddToolbarIcon() {
+    if (!g_toolbarIcons.hToolbarBmp) {
+        g_toolbarIcons.hToolbarBmp = MakeToolbarBitmap(false);
+        g_toolbarIcons.hToolbarIcon = MakeToolbarIcon(g_toolbarIcons.hToolbarBmp);
+        HBITMAP darkBitmap = MakeToolbarBitmap(true);
+        g_toolbarIcons.hToolbarIconDarkMode = MakeToolbarIcon(darkBitmap);
+        DeleteObject(darkBitmap);
+    }
+    SendMessage(g_npp._nppHandle, NPPM_ADDTOOLBARICON_FORDARKMODE, g_funcs[0]._cmdID, reinterpret_cast<LPARAM>(&g_toolbarIcons));
+    SendMessage(g_npp._nppHandle, NPPM_SETMENUITEMCHECK, g_funcs[0]._cmdID, g_enabled);
+}
+
 static void LoadSettings() {
     wchar_t appData[MAX_PATH]{};
     if (GetEnvironmentVariable(L"APPDATA", appData, MAX_PATH) == 0) return;
@@ -365,11 +449,17 @@ static void LoadSettings() {
     swprintf_s(directory, L"%s\\Notepad++\\plugins\\config", appData); CreateDirectory(directory, nullptr);
     g_selectOnHover = GetPrivateProfileInt(L"Settings", L"SelectOnHover", 1, g_settingsPath) != 0;
     g_useNativePickerForAlpha = GetPrivateProfileInt(L"Settings", L"UseNativePickerForAlpha", 1, g_settingsPath) != 0;
+    g_enabled = GetPrivateProfileInt(L"Settings", L"Enabled", 1, g_settingsPath) != 0;
+    g_toggleHotkey = static_cast<WORD>(GetPrivateProfileInt(L"Settings", L"ToggleHotkey", 0, g_settingsPath));
 }
 
 static void SaveSettings() {
     WritePrivateProfileString(L"Settings", L"SelectOnHover", g_selectOnHover ? L"1" : L"0", g_settingsPath);
     WritePrivateProfileString(L"Settings", L"UseNativePickerForAlpha", g_useNativePickerForAlpha ? L"1" : L"0", g_settingsPath);
+    WritePrivateProfileString(L"Settings", L"Enabled", g_enabled ? L"1" : L"0", g_settingsPath);
+    wchar_t hotkey[16]{};
+    swprintf_s(hotkey, L"%u", static_cast<unsigned>(g_toggleHotkey));
+    WritePrivateProfileString(L"Settings", L"ToggleHotkey", hotkey, g_settingsPath);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -380,13 +470,32 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPA
         CreateWindow(L"BUTTON", g_isTraditionalChinese ? L"針對 #RRGGBBAA 使用原生選色器" : L"Use native color picker for #RRGGBBAA", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             18, 48, 260, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_USE_NATIVE_PICKER_FOR_ALPHA)), GetModuleHandle(nullptr), nullptr);
         SendDlgItemMessage(hwnd, ID_USE_NATIVE_PICKER_FOR_ALPHA, BM_SETCHECK, g_useNativePickerForAlpha ? BST_CHECKED : BST_UNCHECKED, 0);
+        CreateWindow(L"STATIC", g_isTraditionalChinese ? L"啟用／關閉快捷鍵：" : L"Toggle shortcut:", WS_CHILD | WS_VISIBLE,
+            18, 82, 150, 20, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
+        CreateWindowEx(WS_EX_CLIENTEDGE, HOTKEY_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            18, 105, 185, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TOGGLE_HOTKEY)), GetModuleHandle(nullptr), nullptr);
+        SendDlgItemMessage(hwnd, ID_TOGGLE_HOTKEY, HKM_SETHOTKEY, g_toggleHotkey, 0);
+        CreateWindow(L"BUTTON", g_isTraditionalChinese ? L"清除" : L"Clear", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            210, 104, 60, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CLEAR_HOTKEY)), GetModuleHandle(nullptr), nullptr);
         CreateWindow(L"BUTTON", g_isTraditionalChinese ? L"確定" : L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            105, 88, 80, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE_SETTINGS)), GetModuleHandle(nullptr), nullptr);
+            105, 145, 80, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SAVE_SETTINGS)), GetModuleHandle(nullptr), nullptr);
+        return 0;
+    }
+    if (message == WM_COMMAND && LOWORD(wParam) == ID_CLEAR_HOTKEY) {
+        SendDlgItemMessage(hwnd, ID_TOGGLE_HOTKEY, HKM_SETHOTKEY, 0, 0);
         return 0;
     }
     if (message == WM_COMMAND && LOWORD(wParam) == ID_SAVE_SETTINGS) {
+        const WORD hotkey = static_cast<WORD>(SendDlgItemMessage(hwnd, ID_TOGGLE_HOTKEY, HKM_GETHOTKEY, 0, 0));
+        if (hotkey && !(HIBYTE(hotkey) & (HOTKEYF_CONTROL | HOTKEYF_ALT))) {
+            MessageBox(hwnd, g_isTraditionalChinese ? L"快捷鍵需包含 Ctrl 或 Alt。" : L"The shortcut must include Ctrl or Alt.",
+                g_isTraditionalChinese ? L"快捷鍵無效" : L"Invalid shortcut", MB_OK | MB_ICONWARNING);
+            SetFocus(GetDlgItem(hwnd, ID_TOGGLE_HOTKEY));
+            return 0;
+        }
         g_selectOnHover = SendDlgItemMessage(hwnd, ID_SELECT_ON_HOVER, BM_GETCHECK, 0, 0) == BST_CHECKED;
         g_useNativePickerForAlpha = SendDlgItemMessage(hwnd, ID_USE_NATIVE_PICKER_FOR_ALPHA, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        g_toggleHotkey = hotkey;
         SaveSettings(); DestroyWindow(hwnd); return 0;
     }
     if (message == WM_CLOSE) { DestroyWindow(hwnd); return 0; }
@@ -397,12 +506,14 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT message, WPARAM wParam, LPA
 static void Settings() {
     RefreshUiLanguage();
     if (g_settingsWindow) { SetForegroundWindow(g_settingsWindow); return; }
+    INITCOMMONCONTROLSEX controls{ sizeof(controls), ICC_HOTKEY_CLASS };
+    InitCommonControlsEx(&controls);
     WNDCLASS windowClass{};
     windowClass.hInstance = GetModuleHandle(nullptr); windowClass.lpszClassName = L"NppColorPickerSettings";
     windowClass.lpfnWndProc = SettingsProc; windowClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClass(&windowClass);
     constexpr int windowWidth = 280;
-    constexpr int windowHeight = 165;
+    constexpr int windowHeight = 210;
     RECT ownerRect{};
     GetWindowRect(g_npp._nppHandle, &ownerRect);
     HMONITOR monitor = MonitorFromWindow(g_npp._nppHandle, MONITOR_DEFAULTTONEAREST);
@@ -423,7 +534,12 @@ static void About() { RefreshUiLanguage(); MessageBox(g_npp._nppHandle, g_isTrad
 
 extern "C" __declspec(dllexport) void setInfo(NppData data) { g_npp = data; RefreshUiLanguage(); LoadSettings(); }
 extern "C" __declspec(dllexport) const wchar_t* getName() { return L"ColorPicker"; }
-extern "C" __declspec(dllexport) FuncItem* getFuncsArray(int* count) { *count = 2; return g_funcs; }
-extern "C" __declspec(dllexport) void beNotified(SCNotification* notification) { if (!notification) return; if (notification->nmhdr.code == NPPN_READY) { RefreshUiLanguage(); Attach(); } if (notification->nmhdr.code == NPPN_NATIVELANGCHANGED) RefreshUiLanguage(); }
+extern "C" __declspec(dllexport) FuncItem* getFuncsArray(int* count) { *count = 3; return g_funcs; }
+extern "C" __declspec(dllexport) void beNotified(SCNotification* notification) {
+    if (!notification) return;
+    if (notification->nmhdr.code == NPPN_READY) { RefreshUiLanguage(); Attach(); SendMessage(g_npp._nppHandle, NPPM_SETMENUITEMCHECK, g_funcs[0]._cmdID, g_enabled); }
+    if (notification->nmhdr.code == NPPN_TBMODIFICATION) AddToolbarIcon();
+    if (notification->nmhdr.code == NPPN_NATIVELANGCHANGED) RefreshUiLanguage();
+}
 extern "C" __declspec(dllexport) LRESULT messageProc(UINT, WPARAM, LPARAM) { return TRUE; }
 extern "C" __declspec(dllexport) BOOL isUnicode() { return TRUE; }
