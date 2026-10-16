@@ -21,6 +21,7 @@ Click the color palette to select a color.
 2026/10/02 Added Alpha channel color code recognition. Colors are normally displayed using the native color picker; pressing Shift + Click opens the custom color picker.
 
 <img width="502" height="286" alt="image" src="https://github.com/user-attachments/assets/05ccc9b6-a7b3-4126-9fff-bb397610cab4" />
+
 2026/10/16 增加啟用/關閉 快捷鍵設定與工作列圖示
 
 2026/10/16 Added enable/disable settings for keyboard shortcuts and the taskbar icon.
